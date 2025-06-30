@@ -2,6 +2,10 @@
 	"name": "@gander-tools/n8n-workflow-proxy",
 	"version": "0.1.0",
 	"private": true,
+	"engines": {
+		"node": ">=22",
+		"npm": ">=10"
+	},
 	"scripts": {
 		"deploy": "wrangler deploy",
 		"dev": "wrangler dev",
