@@ -80,7 +80,15 @@ export default {
 			}
 		}
 
-		// Return the response
-		return response;
+		// Create a new response with cache-control headers to disable caching
+		const newResponse = new Response(response.body, response);
+
+		// Add cache control headers to disable caching
+		newResponse.headers.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+		newResponse.headers.set('Pragma', 'no-cache');
+		newResponse.headers.set('Expires', '0');
+
+		// Return the response with cache headers
+		return newResponse;
 	},
 };
