@@ -21,9 +21,8 @@ export default {
 
 		const headers = this.prepareHeaders(request.headers, env.N8N_BASE_URL);
 
-		const response = hasTestParam
-			? await this.handleTestParamRequest(workflowId, request, headers, env)
-			: await this.handleStandardRequest(workflowId, request, headers, env);
+		const response = await this.handleRequest(workflowId, request, headers, env, hasTestParam)
+			.catch(() => this.handleRequest(workflowId, request, headers, env, !hasTestParam));
 
 		return this.createNotCachedResponse(response);
 	},
@@ -48,46 +47,20 @@ export default {
 		return headers;
 	},
 
-	async handleTestParamRequest(workflowId, request, headers, env) {
-		// Najpierw próbujemy endpoint webhook-test
-		const testResponse = await this.makeRequest(
-			`/webhook-test/${workflowId}`,
-			request,
-			headers,
-			env
-		);
-
-		// Jeśli nie powiodło się, próbujemy standardowy endpoint
-		if (testResponse.status !== 200) {
-			return await this.makeRequest(
-				`/webhook/${workflowId}`,
-				request,
-				headers,
-				env
-			);
-		}
-
-		return testResponse;
-	},
-
-	async handleStandardRequest(workflowId, request, headers, env) {
+	async handleRequest(workflowId, request, headers, env, isTestHook) {
+		const path = isTestHook ? `/webhook-test/${workflowId}` : `/webhook/${workflowId}`;
 		const response = await this.makeRequest(
-			`/webhook/${workflowId}`,
+			path,
 			request,
 			headers,
 			env
 		);
 
-		if (response.status === 404) {
-			const shouldTryTestEndpoint = await this.shouldTryWebhookTest(response);
-			if (shouldTryTestEndpoint) {
-				return await this.makeRequest(
-					`/webhook-test/${workflowId}`,
-					request,
-					headers,
-					env
-				);
-			}
+		if (response.status !== 200) {
+			const error = new Error(`Request failed with status ${response.status}`);
+			error.status = response.status;
+			error.response = response;
+			throw error;
 		}
 
 		return response;

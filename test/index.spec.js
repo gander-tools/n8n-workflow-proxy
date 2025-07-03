@@ -44,15 +44,15 @@ describe('n8n workflow proxy', () => {
 		expect(await response.text()).toBe('Error: No workflow ID provided in the URL');
 	});
 
-	it('retries with webhook-test endpoint on 404 with code 404', async () => {
+	it('retries with webhook-test endpoint when webhook endpoint fails', async () => {
 		const request = new Request('http://example.com/123');
 		const ctx = createExecutionContext();
 
-		// Mock the fetch function to return a 404 with code 404 on first call
+		// Mock the fetch function to return an error on first call
 		// and a success response on second call
 		global.fetch = vi.fn()
-			.mockResolvedValueOnce(new Response(JSON.stringify({ code: 404 }), { status: 404 }))
-			.mockResolvedValueOnce(new Response('Mocked webhook-test response'));
+			.mockResolvedValueOnce(new Response('Error response', { status: 404 }))
+			.mockResolvedValueOnce(new Response('Mocked webhook-test response', { status: 200 }));
 
 		const response = await worker.fetch(request, env, ctx);
 		await waitOnExecutionContext(ctx);
@@ -75,26 +75,37 @@ describe('n8n workflow proxy', () => {
 		expect(await response.text()).toBe('Mocked webhook-test response');
 	});
 
-	it('does not retry if 404 response is not JSON with code 404', async () => {
+	it('retries with alternate endpoint for any non-200 response', async () => {
 		const request = new Request('http://example.com/123');
 		const ctx = createExecutionContext();
 
-		// Mock the fetch function to return a 404 without the expected JSON structure
+		// Mock the fetch function to return a non-200 response on first call
+		// and a success response on second call
 		global.fetch = vi.fn()
-			.mockResolvedValueOnce(new Response('Not found', { status: 404 }));
+			.mockImplementationOnce(() => Promise.resolve(new Response('Not found', { status: 404 })))
+			.mockImplementationOnce(() => Promise.resolve(new Response('Success on second try', { status: 200 })));
 
 		const response = await worker.fetch(request, env, ctx);
 		await waitOnExecutionContext(ctx);
 
-		// Check that fetch was called only once
-		expect(global.fetch).toHaveBeenCalledTimes(1);
-		expect(global.fetch).toHaveBeenCalledWith(
+		// Check that fetch was called twice with the correct URLs
+		expect(global.fetch).toHaveBeenCalledTimes(2);
+		expect(global.fetch).toHaveBeenNthCalledWith(
+			1,
 			expect.objectContaining({
 				url: 'https://n8n.example.com/webhook/123'
 			})
 		);
+		expect(global.fetch).toHaveBeenNthCalledWith(
+			2,
+			expect.objectContaining({
+				url: 'https://n8n.example.com/webhook-test/123'
+			})
+		);
 
-		expect(response.status).toBe(404);
+		// The second response should be returned
+		expect(response.status).toBe(200);
+		expect(await response.text()).toBe('Success on second try');
 	});
 
 	it('tries webhook-test endpoint first when t parameter is present', async () => {
@@ -164,6 +175,96 @@ describe('n8n workflow proxy', () => {
 
 		// Restore the environment variable
 		env.N8N_BASE_URL = originalN8nBaseUrl;
+	});
+
+	it('handleRequest throws error for non-200 responses', async () => {
+		// Create a mock request and environment
+		const request = new Request('http://example.com/123');
+		const mockHeaders = new Headers();
+		const mockEnv = { N8N_BASE_URL: 'https://n8n.example.com' };
+
+		// Mock the fetch function to return a non-200 response
+		global.fetch = vi.fn().mockResolvedValue(new Response('Error response', { status: 404 }));
+
+		// Call handleRequest directly and expect it to throw an error
+		await expect(worker.handleRequest('123', request, mockHeaders, mockEnv, false))
+			.rejects.toThrow('Request failed with status 404');
+
+		// Verify fetch was called with the correct URL
+		expect(global.fetch).toHaveBeenCalledWith(
+			expect.objectContaining({
+				url: 'https://n8n.example.com/webhook/123'
+			})
+		);
+	});
+
+	it('handleRequest uses correct path based on isTestHook parameter', async () => {
+		// Create a mock request and environment
+		const request = new Request('http://example.com/123');
+		const mockHeaders = new Headers();
+		const mockEnv = { N8N_BASE_URL: 'https://n8n.example.com' };
+
+		// Mock the fetch function to return a success response
+		global.fetch = vi.fn().mockResolvedValue(new Response('Success response', { status: 200 }));
+
+		// Call handleRequest with isTestHook = true
+		await worker.handleRequest('123', request, mockHeaders, mockEnv, true);
+
+		// Verify fetch was called with the webhook-test URL
+		expect(global.fetch).toHaveBeenCalledWith(
+			expect.objectContaining({
+				url: 'https://n8n.example.com/webhook-test/123'
+			})
+		);
+
+		// Reset the mock
+		global.fetch.mockReset();
+		global.fetch = vi.fn().mockResolvedValue(new Response('Success response', { status: 200 }));
+
+		// Call handleRequest with isTestHook = false
+		await worker.handleRequest('123', request, mockHeaders, mockEnv, false);
+
+		// Verify fetch was called with the webhook URL
+		expect(global.fetch).toHaveBeenCalledWith(
+			expect.objectContaining({
+				url: 'https://n8n.example.com/webhook/123'
+			})
+		);
+	});
+
+	it('retries with alternate endpoint regardless of response content', async () => {
+		const request = new Request('http://example.com/123');
+		const ctx = createExecutionContext();
+
+		// Mock the fetch function to return different types of error responses
+		// and a success response on the last call
+		global.fetch = vi.fn()
+			// First call: return a non-JSON error response
+			.mockResolvedValueOnce(new Response('Not a JSON error', { status: 500 }))
+			// Second call: return a success response
+			.mockResolvedValueOnce(new Response('Success response', { status: 200 }));
+
+		const response = await worker.fetch(request, env, ctx);
+		await waitOnExecutionContext(ctx);
+
+		// Check that fetch was called twice with the correct URLs
+		expect(global.fetch).toHaveBeenCalledTimes(2);
+		expect(global.fetch).toHaveBeenNthCalledWith(
+			1,
+			expect.objectContaining({
+				url: 'https://n8n.example.com/webhook/123'
+			})
+		);
+		expect(global.fetch).toHaveBeenNthCalledWith(
+			2,
+			expect.objectContaining({
+				url: 'https://n8n.example.com/webhook-test/123'
+			})
+		);
+
+		// The second response should be returned
+		expect(response.status).toBe(200);
+		expect(await response.text()).toBe('Success response');
 	});
 
 });
