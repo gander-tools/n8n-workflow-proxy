@@ -25,7 +25,7 @@ export default {
 			? await this.handleTestParamRequest(workflowId, request, headers, env)
 			: await this.handleStandardRequest(workflowId, request, headers, env);
 
-		return this.createCachedResponse(response);
+		return this.createNotCachedResponse(response);
 	},
 
 	validateEnvironment(env) {
@@ -130,7 +130,7 @@ export default {
 		}
 	},
 
-	createCachedResponse(response) {
+	createNotCachedResponse(response) {
 		const newResponse = new Response(response.body, response);
 		newResponse.headers.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
 		newResponse.headers.set('Pragma', 'no-cache');
