@@ -10,7 +10,7 @@
 		"deploy": "wrangler deploy",
 		"dev": "wrangler dev",
 		"start": "wrangler dev",
-		"test": "vitest"
+		"test": "vitest run"
 	},
 	"devDependencies": {
 		"@cloudflare/vitest-pool-workers": "^0.8.47",
