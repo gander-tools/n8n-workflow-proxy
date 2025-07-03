@@ -10,85 +10,131 @@
 
 export default {
 	async fetch(request, env, ctx) {
-		// Check if required environment variables are set
-		if (!env.N8N_BASE_URL) {
+		if (!this.validateEnvironment(env)) {
 			return new Response('Error: N8N_BASE_URL environment variable is not set', { status: 500 });
 		}
 
-		// Create a new URL object from the original request URL
-		const url = new URL(request.url);
-
-		// Extract the workflow ID from the URL path
-		// The path is expected to be in the format /xyz where xyz is the workflow ID
-		const pathParts = url.pathname.split('/').filter(part => part !== '');
-		const workflowId = pathParts.length > 0 ? pathParts[0] : '';
-
+		const { workflowId, hasTestParam } = this.parseRequestUrl(request.url);
 		if (!workflowId) {
 			return new Response('Error: No workflow ID provided in the URL', { status: 400 });
 		}
 
-		// Clone the request headers
-		const headers = new Headers(request.headers);
+		const headers = this.prepareHeaders(request.headers, env.N8N_BASE_URL);
 
-		// Set the host header to the n8n instance host
-		headers.set('host', new URL(env.N8N_BASE_URL).host);
+		const response = hasTestParam
+			? await this.handleTestParamRequest(workflowId, request, headers, env)
+			: await this.handleStandardRequest(workflowId, request, headers, env);
 
-		// Create a new request to the n8n instance with /webhook/{workflowId} path
-		const n8nUrl = new URL(`/webhook/${workflowId}${url.search}`, env.N8N_BASE_URL);
+		return this.createCachedResponse(response);
+	},
 
-		const n8nRequest = new Request(n8nUrl.toString(), {
-			method: request.method,
-			headers: headers,
-			body: request.body,
-			redirect: 'follow',
-		});
+	validateEnvironment(env) {
+		return !!env.N8N_BASE_URL;
+	},
 
-		// Fetch the response from the n8n instance
-		let response = await fetch(n8nRequest);
+	parseRequestUrl(requestUrl) {
+		const url = new URL(requestUrl);
+		const pathParts = url.pathname.split('/').filter(part => part !== '');
+		return {
+			workflowId: pathParts.length > 0 ? pathParts[0] : '',
+			hasTestParam: url.searchParams.has('t'),
+			searchParams: url.search
+		};
+	},
 
-		// If the response is a 404, try with /webhook-test/{workflowId}
+	prepareHeaders(originalHeaders, baseUrl) {
+		const headers = new Headers(originalHeaders);
+		headers.set('host', new URL(baseUrl).host);
+		return headers;
+	},
+
+	async handleTestParamRequest(workflowId, request, headers, env) {
+		// Najpierw próbujemy endpoint webhook-test
+		const testResponse = await this.makeRequest(
+			`/webhook-test/${workflowId}`,
+			request,
+			headers,
+			env
+		);
+
+		// Jeśli nie powiodło się, próbujemy standardowy endpoint
+		if (testResponse.status !== 200) {
+			return await this.makeRequest(
+				`/webhook/${workflowId}`,
+				request,
+				headers,
+				env
+			);
+		}
+
+		return testResponse;
+	},
+
+	async handleStandardRequest(workflowId, request, headers, env) {
+		const response = await this.makeRequest(
+			`/webhook/${workflowId}`,
+			request,
+			headers,
+			env
+		);
+
 		if (response.status === 404) {
-			// Clone the response so we can read its body without consuming it
-			const clonedResponse = response.clone();
-
-			try {
-				// Try to parse the response as JSON
-				const responseData = await clonedResponse.json();
-
-				// Check if it's a 404 with the expected code
-				if (responseData && responseData.code === 404) {
-					// Create a new URL for the webhook-test endpoint
-					const testUrl = new URL(`/webhook-test/${workflowId}${url.search}`, env.N8N_BASE_URL);
-
-					// We need to clone the original request to get a fresh body stream
-					const originalRequest = request.clone();
-
-					// Create a new request to the webhook-test endpoint
-					const testRequest = new Request(testUrl.toString(), {
-						method: originalRequest.method,
-						headers: headers,
-						body: originalRequest.body,
-						redirect: 'follow',
-					});
-
-					// Fetch the response from the webhook-test endpoint
-					response = await fetch(testRequest);
-				}
-			} catch (error) {
-				// If parsing the response fails (e.g., it's not JSON), continue with the original response
-				console.error('Error parsing response:', error);
+			const shouldTryTestEndpoint = await this.shouldTryWebhookTest(response);
+			if (shouldTryTestEndpoint) {
+				return await this.makeRequest(
+					`/webhook-test/${workflowId}`,
+					request,
+					headers,
+					env
+				);
 			}
 		}
 
-		// Create a new response with cache-control headers to disable caching
-		const newResponse = new Response(response.body, response);
+		return response;
+	},
 
-		// Add cache control headers to disable caching
+	async makeRequest(path, originalRequest, headers, env) {
+		const url = new URL(path + new URL(originalRequest.url).search, env.N8N_BASE_URL);
+		const clonedRequest = originalRequest.clone();
+
+		return await fetch(new Request(url.toString(), {
+			method: clonedRequest.method,
+			headers: headers,
+			body: clonedRequest.body,
+			redirect: 'follow'
+		}));
+	},
+
+	async shouldTryWebhookTest(response) {
+		try {
+			const clonedResponse = response.clone();
+			const responseText = await clonedResponse.text();
+
+			// Check if the response looks like JSON before trying to parse it
+			if (!responseText || !responseText.trim().startsWith('{')) {
+				// Not a JSON response, no need to try webhook-test
+				return false;
+			}
+
+			try {
+				const responseData = JSON.parse(responseText);
+				return responseData && responseData.code === 404;
+			} catch (parseError) {
+				// If parsing fails, it's not a valid JSON response
+				// Silently handle the error without logging
+				return false;
+			}
+		} catch (error) {
+			// Silently handle any other errors without logging
+			return false;
+		}
+	},
+
+	createCachedResponse(response) {
+		const newResponse = new Response(response.body, response);
 		newResponse.headers.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
 		newResponse.headers.set('Pragma', 'no-cache');
 		newResponse.headers.set('Expires', '0');
-
-		// Return the response with cache headers
 		return newResponse;
-	},
+	}
 };
