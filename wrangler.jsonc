@@ -11,7 +11,7 @@
 	"observability": {
 		"enabled": true
 	},
-	"keep_vars": true,
+	"keep_vars": true
 	/**
 	 * Smart Placement
 	 * Docs: https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
@@ -29,9 +29,9 @@
 	 * Environment Variables
 	 * https://developers.cloudflare.com/workers/wrangler/configuration/#environment-variables
 	 */
-	"vars": {
-		"N8N_BASE_URL": ""
-	}
+    //	"vars": {
+    //		"N8N_BASE_URL": ""
+    //	}
 	/**
 	 * Note: Use secrets to store sensitive data.
 	 * https://developers.cloudflare.com/workers/configuration/secrets/
