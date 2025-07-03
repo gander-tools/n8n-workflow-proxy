@@ -1,12 +1,33 @@
-/**
- * Welcome to Cloudflare Workers! This is your first worker.
- *
- * - Run `npm run dev` in your terminal to start a development server
- * - Open a browser tab at http://localhost:8787/ to see your worker in action
- * - Run `npm run deploy` to publish your worker
- *
- * Learn more at https://developers.cloudflare.com/workers/
- */
+const WEBHOOK_TYPES = {
+	TEST: 'webhook-test',
+	PRODUCTION: 'webhook'
+};
+
+const OPTION_TYPES = {
+	TEST_THEN_PROD: 'tp',
+	PROD_THEN_TEST: 'pt',
+	TEST_ONLY: 't',
+	PROD_ONLY: 'p'
+};
+
+const WEBHOOK_STRATEGIES = {
+	[OPTION_TYPES.TEST_THEN_PROD]: {
+		primary: true,
+		fallback: false
+	},
+	[OPTION_TYPES.PROD_THEN_TEST]: {
+		primary: false,
+		fallback: true
+	},
+	[OPTION_TYPES.TEST_ONLY]: {
+		primary: true,
+		fallback: null
+	},
+	[OPTION_TYPES.PROD_ONLY]: {
+		primary: false,
+		fallback: null
+	}
+};
 
 export default {
 	async fetch(request, env, ctx) {
@@ -14,17 +35,28 @@ export default {
 			return new Response('Error: N8N_BASE_URL environment variable is not set', { status: 500 });
 		}
 
-		const { workflowId, hasTestParam } = this.parseRequestUrl(request.url);
+		const { workflowId, option } = this.parseRequestUrl(request.url);
 		if (!workflowId) {
 			return new Response('Error: No workflow ID provided in the URL', { status: 400 });
 		}
 
 		const headers = this.prepareHeaders(request.headers, env.N8N_BASE_URL);
-
-		const response = await this.handleRequest(workflowId, request, headers, env, hasTestParam)
-			.catch(() => this.handleRequest(workflowId, request, headers, env, !hasTestParam));
+		const response = await this.executeWebhookStrategy(workflowId, request, headers, env, option);
 
 		return this.createNotCachedResponse(response);
+	},
+
+	async executeWebhookStrategy(workflowId, request, headers, env, option) {
+		const strategy = WEBHOOK_STRATEGIES[option] || WEBHOOK_STRATEGIES[OPTION_TYPES.PROD_ONLY];
+
+		try {
+			return await this.handleRequest(workflowId, request, headers, env, strategy.primary);
+		} catch (error) {
+			if (strategy.fallback !== null) {
+				return await this.handleRequest(workflowId, request, headers, env, strategy.fallback);
+			}
+			throw error;
+		}
 	},
 
 	validateEnvironment(env) {
@@ -33,10 +65,11 @@ export default {
 
 	parseRequestUrl(requestUrl) {
 		const url = new URL(requestUrl);
-		const pathParts = url.pathname.split('/').filter(part => part !== '');
+		const [option, workflowId] = url.pathname.split('/').filter(Boolean);
+
 		return {
-			workflowId: pathParts.length > 0 ? pathParts[0] : '',
-			hasTestParam: url.searchParams.has('t'),
+			workflowId: workflowId || '',
+			option: option || OPTION_TYPES.PROD_ONLY,
 			searchParams: url.search
 		};
 	},
@@ -48,13 +81,10 @@ export default {
 	},
 
 	async handleRequest(workflowId, request, headers, env, isTestHook) {
-		const path = isTestHook ? `/webhook-test/${workflowId}` : `/webhook/${workflowId}`;
-		const response = await this.makeRequest(
-			path,
-			request,
-			headers,
-			env
-		);
+		const webhookType = isTestHook ? WEBHOOK_TYPES.TEST : WEBHOOK_TYPES.PRODUCTION;
+		const path = `/${webhookType}/${workflowId}`;
+
+		const response = await this.makeRequest(path, request, headers, env);
 
 		if (response.status !== 200) {
 			const error = new Error(`Request failed with status ${response.status}`);
@@ -76,31 +106,6 @@ export default {
 			body: clonedRequest.body,
 			redirect: 'follow'
 		}));
-	},
-
-	async shouldTryWebhookTest(response) {
-		try {
-			const clonedResponse = response.clone();
-			const responseText = await clonedResponse.text();
-
-			// Check if the response looks like JSON before trying to parse it
-			if (!responseText || !responseText.trim().startsWith('{')) {
-				// Not a JSON response, no need to try webhook-test
-				return false;
-			}
-
-			try {
-				const responseData = JSON.parse(responseText);
-				return responseData && responseData.code === 404;
-			} catch (parseError) {
-				// If parsing fails, it's not a valid JSON response
-				// Silently handle the error without logging
-				return false;
-			}
-		} catch (error) {
-			// Silently handle any other errors without logging
-			return false;
-		}
 	},
 
 	createNotCachedResponse(response) {
